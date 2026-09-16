@@ -1,0 +1,232 @@
+name: YouTube Clone CI/CD
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+
+env:
+  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/youtube-clone
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  ECR_REPOSITORY: youtube-clone
+  SONARQUBE_URL: ${{ secrets.SONARQUBE_URL }}
+  SONARQUBE_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+jobs:
+  lint:
+    name: ESLint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  sast:
+    name: SonarQube SAST
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v2
+        with:
+          args: >
+            -Dsonar.projectKey=youtube-clone
+            -Dsonar.sources=src
+            -Dsonar.host.url=${{ env.SONARQUBE_URL }}
+            -Dsonar.login=${{ env.SONARQUBE_TOKEN }}
+
+      - name: Quality Gate Check
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        with:
+          args: >
+            -Dsonar.projectKey=youtube-clone
+
+  sca:
+    name: Snyk SCA Scan
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Snyk Open Source
+        uses: snyk/actions/node@1.0.10
+        continue-on-error: false
+        env:
+          SNYK_TOKEN: ${{ env.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=high
+
+  build-scan-push:
+    name: Build, Scan & Push
+    needs: [sast, sca]
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/heads/main ]]; then
+            echo "version=staging-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          else
+            echo "version=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registries: ${{ env.ECR_REGISTRY }}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+      - name: Snyk container scan
+        uses: snyk/actions/docker@1.0.10
+        continue-on-error: false
+        env:
+          SNYK_TOKEN: ${{ env.SNYK_TOKEN }}
+        with:
+          image: ${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }}
+          args: --severity-threshold=high
+
+      - name: Push to DockerHub
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.DOCKERHUB_REPO }}:${{ steps.meta.outputs.version }}
+            ${{ env.DOCKERHUB_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push to ECR
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.version }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to K8s
+    needs: build-scan-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine environment
+        id: env
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "namespace=prod" >> $GITHUB_OUTPUT
+            echo "values_file=helm/values-prod.yaml" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/heads/main ]]; then
+            echo "namespace=staging" >> $GITHUB_OUTPUT
+            echo "values_file=helm/values-staging.yaml" >> $GITHUB_OUTPUT
+          else
+            echo "namespace=dev" >> $GITHUB_OUTPUT
+            echo "values_file=helm/values-dev.yaml" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install youtube-clone ./helm \
+            --namespace ${{ steps.env.outputs.namespace }} \
+            --create-namespace \
+            -f ${{ steps.env.outputs.values_file }} \
+            --set image.repository=${{ env.DOCKERHUB_REPO }} \
+            --set image.tag=${{ needs.build-scan-push.outputs.image_tag }} \
+            --wait \
+            --timeout 5m
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/youtube-clone \
+            -n ${{ steps.env.outputs.namespace }} \
+            --timeout=120s
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"Deploy failed for youtube-clone to ${{ steps.env.outputs.namespace }}"}'

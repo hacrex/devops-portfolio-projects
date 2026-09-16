@@ -1,0 +1,151 @@
+name: Application Tier CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'application-tier/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'application-tier/**'
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: devsecops-app-api
+  EKS_CLUSTER: devsecops-eks-cluster
+  K8S_NAMESPACE: application
+
+defaults:
+  run:
+    working-directory: application-tier
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: application-tier/package-lock.json
+      - run: npm ci
+      - run: npm test -- --coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: application-tier/coverage/
+
+  sast:
+    name: SonarQube SAST
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: sonarsource/sonarqube-scan-action@v2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: application-tier
+          args: >
+            -Dsonar.projectKey=devsecops-app-api
+            -Dsonar.sources=src
+            -Dsonar.tests=tests
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+  sca:
+    name: Snyk SCA
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: snyk/actions/node@1.0.10
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=high
+          file: application-tier/package.json
+
+  docker-build:
+    name: Build & Push Image
+    needs: [sast, sca]
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsECRPush
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - uses: docker/setup-buildx-action@v3
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+      - uses: docker/build-push-action@v5
+        with:
+          context: application-tier
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  trivy-scan:
+    name: Trivy Image Scan
+    needs: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.docker-build.outputs.image_tag }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          ignore-unfixed: true
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  deploy:
+    name: Deploy to EKS
+    needs: [docker-build, trivy-scan]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsEKSDeploy
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: azure/setup-kubectl@v3
+        with:
+          version: v1.29.0
+      - run: |
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+      - name: Deploy rolling update
+        run: |
+          kubectl set image deployment/api-deployment \
+            api=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ needs.docker-build.outputs.image_tag }} \
+            -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/api-deployment \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=300s

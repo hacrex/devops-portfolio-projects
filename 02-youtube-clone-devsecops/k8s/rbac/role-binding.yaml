@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: youtube-clone-ci-deployer
+  namespace: dev
+  labels:
+    app.kubernetes.io/name: youtube-clone
+    app.kubernetes.io/component: ci
+subjects:
+  - kind: ServiceAccount
+    name: youtube-clone-ci
+    namespace: dev
+roleRef:
+  kind: Role
+  name: youtube-clone-deployer
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,16 @@
+apiVersion: v2
+name: youtube-clone
+description: YouTube Clone DevSecOps application
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - youtube
+  - video
+  - streaming
+maintainers:
+  - name: DevOps Team
+    email: devops@example.com
+home: https://github.com/example/youtube-clone
+sources:
+  - https://github.com/example/youtube-clone

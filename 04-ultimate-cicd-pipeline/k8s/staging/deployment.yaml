@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capstone-app
+  namespace: staging
+  labels:
+    app: capstone-app
+    environment: staging
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: capstone-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: capstone-app
+        environment: staging
+    spec:
+      containers:
+        - name: capstone-app
+          image: ghcr.io/org/capstone-app:latest
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: staging
+            - name: DB_HOST
+              value: postgres-staging.staging.svc.cluster.local
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: capstone_staging
+            - valueFrom:
+                secretKeyRef:
+                  name: capstone-app-secrets
+                  key: db-password
+                  optional: false
+              name: DB_PASSWORD
+            - name: REDIS_HOST
+              value: redis-staging.staging.svc.cluster.local
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+      terminationGracePeriodSeconds: 30

@@ -1,0 +1,18 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "youtube-clone.fullname" . }}
+  labels:
+    {{- include "youtube-clone.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.autoscaling.minAvailable }}
+  minAvailable: {{ .Values.autoscaling.minAvailable }}
+  {{- end }}
+  {{- if .Values.autoscaling.maxUnavailable }}
+  maxUnavailable: {{ .Values.autoscaling.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "youtube-clone.selectorLabels" . | nindent 6 }}
+{{- end }}

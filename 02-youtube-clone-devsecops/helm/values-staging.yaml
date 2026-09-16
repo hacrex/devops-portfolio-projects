@@ -1,0 +1,32 @@
+replicaCount: 2
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+ingress:
+  hosts:
+    - host: youtube-staging.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: youtube-staging-tls
+      hosts:
+        - youtube-staging.example.com
+
+env:
+  - name: NODE_ENV
+    value: staging
+  - name: LOG_LEVEL
+    value: info

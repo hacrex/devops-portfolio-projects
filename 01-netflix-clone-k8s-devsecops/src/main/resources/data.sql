@@ -1,0 +1,6 @@
+INSERT INTO movies (title, description, genre, year, image_url) VALUES
+('The Matrix', 'A computer hacker learns from mysterious rebels about the true nature of his reality and his role in the war against its controllers.', 'Sci-Fi', 1999, 'https://image.tmdb.org/t/p/w500/f89U3ADr1oiB1s9GkdPOEpXUk5H.jpg'),
+('Inception', 'A thief who steals corporate secrets through the use of dream-sharing technology is given the inverse task of planting an idea.', 'Sci-Fi', 2010, 'https://image.tmdb.org/t/p/w500/ljsZTbVsrQSqZgWeep2B1QiDKuh.jpg'),
+('Interstellar', 'A team of explorers travel through a wormhole in space in an attempt to ensure humanitys survival.', 'Sci-Fi', 2014, 'https://image.tmdb.org/t/p/w500/gEU2QniL6E7b9lSkUwHBBPfTugK.jpg'),
+('The Dark Knight', 'When the menace known as the Joker wreaks havoc on Gotham, Batman must accept one of the greatest psychological tests of his ability to fight injustice.', 'Action', 2008, 'https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911BTUgMe1nF1iC.jpg'),
+('Pulp Fiction', 'The lives of two mob hitmen, a boxer, a gangster and his wife, and a pair of diner bandits intertwine in four tales of violence and redemption.', 'Crime', 1994, 'https://image.tmdb.org/t/p/w500/fIEFLlHFGqEGKMS3osAsGJfW2oy.jpg');

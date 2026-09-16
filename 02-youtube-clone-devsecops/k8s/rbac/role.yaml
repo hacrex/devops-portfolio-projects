@@ -1,0 +1,24 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: youtube-clone-deployer
+  namespace: dev
+  labels:
+    app.kubernetes.io/name: youtube-clone
+    app.kubernetes.io/component: ci
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "list", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]

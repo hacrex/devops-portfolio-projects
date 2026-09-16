@@ -1,0 +1,88 @@
+stages:
+  - validate
+  - plan
+  - security
+  - apply
+
+variables:
+  TF_ROOT: terraform
+  TF_STATE_NAME: default
+
+# Cache Terraform plugins for faster runs
+cache:
+  key: "${TF_ROOT}"
+  paths:
+    - ${TF_ROOT}/.terraform/
+
+validate:
+  stage: validate
+  image: hashicorp/terraform:1.6
+  script:
+    - cd ${TF_ROOT}
+    - terraform fmt -check -recursive
+    - terraform init -backend=false
+    - terraform validate
+  rules:
+    - if: '$CI_MERGE_REQUEST_ID'
+
+plan:
+  stage: plan
+  image: hashicorp/terraform:1.6
+  script:
+    - cd ${TF_ROOT}
+    - terraform init -backend-config="../backends/${TF_STATE_NAME}.hcl"
+    - terraform plan -var-file="../environments/${CI_ENVIRONMENT_NAME}.tfvars" -out=tfplan
+    - terraform show -json tfplan > tfplan.json
+  artifacts:
+    paths:
+      - ${TF_ROOT}/tfplan
+      - ${TF_ROOT}/tfplan.json
+    expire_in: 1 week
+  rules:
+    - if: '$CI_MERGE_REQUEST_ID'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+security-scan:
+  stage: security
+  image:
+    name: aquasec/tfsec:latest
+    entrypoint: [""]
+  script:
+    - tfsec ${TF_ROOT} --format json --out tfsec-report.json || true
+    - tfsec ${TF_ROOT}
+  artifacts:
+    paths:
+      - tfsec-report.json
+    expire_in: 1 week
+  rules:
+    - if: '$CI_MERGE_REQUEST_ID'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+apply-dev:
+  stage: apply
+  image: hashicorp/terraform:1.6
+  script:
+    - cd ${TF_ROOT}
+    - terraform init -backend-config="../backends/dev.hcl"
+    - terraform apply -auto-approve -var-file="../environments/dev.tfvars"
+  environment:
+    name: dev
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+      when: manual
+  allow_failure: false
+
+apply-prod:
+  stage: apply
+  image: hashicorp/terraform:1.6
+  script:
+    - cd ${TF_ROOT}
+    - terraform init -backend-config="../backends/prod.hcl"
+    - terraform apply -auto-approve -var-file="../environments/prod.tfvars"
+  environment:
+    name: production
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  allow_failure: false

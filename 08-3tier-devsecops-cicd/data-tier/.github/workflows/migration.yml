@@ -1,0 +1,114 @@
+name: Database Migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      migration_version:
+        description: "Specific version to run (leave empty for all pending)"
+        required: false
+        type: string
+        default: ""
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  validate:
+    name: Validate Migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: List pending migrations
+        run: |
+          echo "=== Pending Migrations ==="
+          ls -la data-tier/migrations/*.sql
+          echo "=== Migration count: $(ls data-tier/migrations/*.sql | wc -l) ==="
+
+  apply-staging:
+    name: Apply to Staging
+    needs: validate
+    if: inputs.target_environment == 'staging'
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsMigrationRole
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Fetch DB credentials from Secrets Manager
+        id: secrets
+        run: |
+          SECRET=$(aws secretsmanager get-secret-value --secret-id devsecops/staging/db-credentials --query SecretString --output text)
+          echo "host=$(echo $SECRET | jq -r .host)" >> "$GITHUB_OUTPUT"
+          echo "dbname=$(echo $SECRET | jq -r .dbname)" >> "$GITHUB_OUTPUT"
+          echo "username=$(echo $SECRET | jq -r .username)" >> "$GITHUB_OUTPUT"
+          echo "password=$(echo $SECRET | jq -r .password)" >> "$GITHUB_OUTPUT"
+      - name: Install Flyway
+        run: |
+          curl -sL https://flywaydb.org/getcommunity.tar.gz | tar xz
+          echo "$PWD/flyway-10.6.0" >> $GITHUB_PATH
+      - name: Run migrations against staging
+        run: |
+          flyway -url=jdbc:postgresql://${{ steps.secrets.outputs.host }}:5432/${{ steps.secrets.outputs.dbname }} \
+            -user=${{ steps.secrets.outputs.username }} \
+            -password=${{ steps.secrets.outputs.password }} \
+            -locations=filesystem:data-tier/migrations \
+            migrate
+      - name: Verify migration status
+        run: |
+          flyway -url=jdbc:postgresql://${{ steps.secrets.outputs.host }}:5432/${{ steps.secrets.outputs.dbname }} \
+            -user=${{ steps.secrets.outputs.username }} \
+            -password=${{ steps.secrets.outputs.password }} \
+            info
+
+  apply-production:
+    name: Apply to Production
+    needs: validate
+    if: inputs.target_environment == 'production'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/GitHubActionsMigrationRole
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Fetch DB credentials from Secrets Manager
+        id: secrets
+        run: |
+          SECRET=$(aws secretsmanager get-secret-value --secret-id devsecops/production/db-credentials --query SecretString --output text)
+          echo "host=$(echo $SECRET | jq -r .host)" >> "$GITHUB_OUTPUT"
+          echo "dbname=$(echo $SECRET | jq -r .dbname)" >> "$GITHUB_OUTPUT"
+          echo "username=$(echo $SECRET | jq -r .username)" >> "$GITHUB_OUTPUT"
+          echo "password=$(echo $SECRET | jq -r .password)" >> "$GITHUB_OUTPUT"
+      - name: Install Flyway
+        run: |
+          curl -sL https://flywaydb.org/getcommunity.tar.gz | tar xz
+          echo "$PWD/flyway-10.6.0" >> $GITHUB_PATH
+      - name: Run migrations against production
+        run: |
+          flyway -url=jdbc:postgresql://${{ steps.secrets.outputs.host }}:5432/${{ steps.secrets.outputs.dbname }} \
+            -user=${{ steps.secrets.outputs.username }} \
+            -password=${{ steps.secrets.outputs.password }} \
+            -locations=filesystem:data-tier/migrations \
+            migrate
+      - name: Verify migration status
+        run: |
+          flyway -url=jdbc:postgresql://${{ steps.secrets.outputs.host }}:5432/${{ steps.secrets.outputs.dbname }} \
+            -user=${{ steps.secrets.outputs.username }} \
+            -password=${{ steps.secrets.outputs.password }} \
+            info

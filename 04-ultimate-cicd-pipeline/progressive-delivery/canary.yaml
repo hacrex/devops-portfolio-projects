@@ -1,0 +1,43 @@
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata:
+  name: capstone-app
+  namespace: production
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: capstone-app
+  progressDeadlineSeconds: 600
+  service:
+    port: 80
+    targetPort: 8080
+  analysis:
+    interval: 1m
+    threshold: 5
+    maxWeight: 50
+    stepWeight: 10
+    metrics:
+      - name: request-success-rate
+        thresholdRange:
+          min: 99
+        interval: 1m
+      - name: request-duration
+        thresholdRange:
+          max: 500
+        interval: 1m
+      - name: error-rate
+        thresholdRange:
+          max: 1
+        interval: 1m
+    webhooks:
+      load-test:
+        url: http://flagger-loadtester.flagger-system/
+        metadata:
+          type: bash
+          cmd: "curl -sd 'test' http://capstone-app-canary.production/api/endpoint | grep -q '200'"
+      alert:
+        url: http://flagger-loadtester.flagger-system/
+        metadata:
+          type: cmd
+          cmd: "curl -s -X POST https://hooks.slack.com/services/T00/B00/xxx -d '{\"text\":\"Canary analysis failed for capstone-app\"}'"

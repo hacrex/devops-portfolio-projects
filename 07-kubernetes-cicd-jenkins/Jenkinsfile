@@ -1,0 +1,176 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: docker
+    image: docker:24-cli
+    command: ['sleep', 'infinity']
+    env:
+    - name: DOCKER_HOST
+      value: tcp://localhost:2375
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  - name: dind
+    image: docker:24-dind
+    securityContext:
+      privileged: false
+    env:
+    - name: DOCKER_TLS_CERTDIR
+      value: ""
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  - name: helm
+    image: alpine/helm:3.14
+    command: ['sleep', 'infinity']
+  - name: kubectl
+    image: bitnami/kubectl:1.29
+    command: ['sleep', 'infinity']
+  volumes:
+  - name: docker-sock
+    hostPath:
+      path: /var/run/docker.sock
+'''
+        }
+    }
+
+    environment {
+        AWS_REGION         = 'us-east-1'
+        ECR_REPO           = '123456789012.dkr.ecr.us-east-1.amazonaws.com/webapp'
+        SONAR_HOST_URL     = 'http://sonarqube.internal:9000'
+        SONAR_PROJECT_KEY  = 'devops-webapp'
+        K8S_NAMESPACE      = "webapp-${env.BRANCH_NAME == 'main' ? 'prod' : 'staging'}"
+        HELM_RELEASE       = 'webapp'
+        HELM_CHART_PATH    = './helm-chart'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: env.BRANCH_NAME]],
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/your-org/webapp.git',
+                        credentialsId: 'github-ssh'
+                    ]]
+                ])
+            }
+        }
+
+        stage('Build & Test') {
+            steps {
+                container('docker') {
+                    sh '''
+                        docker build --target builder -t webapp-builder:${GIT_COMMIT} .
+                        docker run --rm webapp-builder:${GIT_COMMIT} npm test
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'test-results/**/*.xml'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                container('docker') {
+                    withSonarQubeEnv('sonarqube') {
+                        sh '''
+                            docker run --rm \
+                              -e SONAR_HOST_URL=${SONAR_HOST_URL} \
+                              -e SONAR_LOGIN=${SONAR_TOKEN} \
+                              sonarsource/sonar-scanner-cli \
+                              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                              -Dsonar.sources=src/ \
+                              -Dsonar.tests=test/
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                container('docker') {
+                    withAWS(region: env.AWS_REGION, credentials: 'aws-ecr-creds') {
+                        sh """
+                            docker build -t ${ECR_REPO}:${GIT_COMMIT} .
+                            aws ecr get-login-password --region ${AWS_REGION} | \
+                              docker login --username AWS --password-stdin ${ECR_REPO%%/*}
+                            docker push ${ECR_REPO}:${GIT_COMMIT}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                container('helm') {
+                    withAWS(region: env.AWS_REGION, credentials: 'aws-eks-creds') {
+                        sh """
+                            aws eks update-kubeconfig --name devops-cluster --region ${AWS_REGION}
+                            helm upgrade --install ${HELM_RELEASE} ${HELM_CHART_PATH} \
+                              --namespace ${K8S_NAMESPACE} \
+                              --create-namespace \
+                              --set image.repository=${ECR_REPO} \
+                              --set image.tag=${GIT_COMMIT} \
+                              --wait \
+                              --timeout 5m
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Health Check Gate') {
+            steps {
+                container('kubectl') {
+                    sh """
+                        kubectl rollout status deployment/${HELM_RELEASE} \
+                          -n ${K8S_NAMESPACE} \
+                          --timeout=300s
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            container('helm') {
+                sh """
+                    helm rollback ${HELM_RELEASE} 0 \
+                      --namespace ${K8S_NAMESPACE} \
+                      --wait \
+                      --timeout 3m
+                    echo "Rolled back to previous stable release"
+                """
+            }
+        }
+        success {
+            echo "Deployment ${GIT_COMMIT} healthy in ${K8S_NAMESPACE}"
+        }
+        always {
+            container('docker') {
+                sh 'docker rmi ${ECR_REPO}:${GIT_COMMIT} || true'
+            }
+        }
+    }
+}

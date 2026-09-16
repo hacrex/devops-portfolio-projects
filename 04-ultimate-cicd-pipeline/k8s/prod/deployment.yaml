@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capstone-app
+  namespace: production
+  labels:
+    app: capstone-app
+    environment: production
+    version: stable
+  annotations:
+    canary.flagger.app/primary: "true"
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: capstone-app
+      version: stable
+  template:
+    metadata:
+      labels:
+        app: capstone-app
+        environment: production
+        version: stable
+      annotations:
+        canary.flagger.app/primary: "true"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: capstone-app
+      containers:
+        - name: capstone-app
+          image: ghcr.io/org/capstone-app:latest
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: production
+            - name: DB_HOST
+              value: postgres-primary.production.svc.cluster.local
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: capstone_prod
+            - valueFrom:
+                secretKeyRef:
+                  name: capstone-app-secrets
+                  key: db-password
+                  optional: false
+              name: DB_PASSWORD
+            - name: REDIS_HOST
+              value: redis-production.production.svc.cluster.local
+            - name: JAVA_OPTS
+              value: "-Xms512m -Xmx1024m -XX:+UseG1GC"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000

@@ -1,0 +1,35 @@
+replicaCount: 1
+
+image:
+  pullPolicy: Always
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+autoscaling:
+  enabled: false
+
+ingress:
+  hosts:
+    - host: youtube-dev.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+env:
+  - name: NODE_ENV
+    value: development
+  - name: LOG_LEVEL
+    value: debug
+
+configMap:
+  enabled: true
+  data:
+    API_URL: https://api-dev.example.com
+    CDN_URL: https://cdn-dev.example.com

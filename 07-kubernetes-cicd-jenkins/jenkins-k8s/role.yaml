@@ -1,0 +1,49 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-deployer-role
+  namespace: webapp-prod
+  labels:
+    app.kubernetes.io/name: jenkins-deployer
+    app.kubernetes.io/part-of: cicd
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-deployer-role
+  namespace: webapp-staging
+  labels:
+    app.kubernetes.io/name: jenkins-deployer
+    app.kubernetes.io/part-of: cicd
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]

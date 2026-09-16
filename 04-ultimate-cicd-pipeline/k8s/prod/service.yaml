@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: capstone-app
+  namespace: production
+  labels:
+    app: capstone-app
+    environment: production
+  annotations:
+    canary.flagger.app/primary: "true"
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: capstone-app

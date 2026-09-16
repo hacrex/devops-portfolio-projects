@@ -1,0 +1,206 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        DOCKER_REGISTRY = 'registry.yourdomain.com'
+        APP_NAME = 'myapp'
+        SLACK_CHANNEL = '#deploys'
+    }
+
+    stages {
+        stage('Webhook Validation') {
+            when { triggeredBy 'GenericTriggerCause' }
+            steps {
+                withCredentials([string(credentialsId: 'github-webhook-secret', variable: 'WEBHOOK_SECRET')]) {
+                    sh './scripts/verify-webhook-signature.sh "$WEBHOOK_SECRET"'
+                }
+            }
+        }
+
+        stage('Determine Target') {
+            steps {
+                script {
+                    env.GIT_REF = env.GIT_BRANCH ?: env.TAG_NAME ?: 'unknown'
+                    env.DEPLOY_ENV = 'none'
+                    env.SHOULD_DEPLOY = 'false'
+
+                    if (env.BRANCH_NAME ==~ /feature\/.*/) {
+                        env.DEPLOY_ENV = 'none'
+                        env.SHOULD_DEPLOY = 'false'
+                        env.JOB_PURPOSE = 'feature-build'
+                    } else if (env.BRANCH_NAME == 'develop') {
+                        env.DEPLOY_ENV = 'dev'
+                        env.SHOULD_DEPLOY = 'true'
+                        env.JOB_PURPOSE = 'dev-deploy'
+                    } else if (env.BRANCH_NAME == 'main') {
+                        env.DEPLOY_ENV = 'staging'
+                        env.SHOULD_DEPLOY = 'true'
+                        env.JOB_PURPOSE = 'staging-deploy'
+                    } else if (env.BRANCH_NAME ==~ /v\d+\.\d+\.\d+/) {
+                        env.DEPLOY_ENV = 'production'
+                        env.SHOULD_DEPLOY = 'true'
+                        env.JOB_PURPOSE = 'prod-deploy'
+                    } else {
+                        env.JOB_PURPOSE = 'unknown'
+                    }
+
+                    env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.BUILD_VERSION = "${env.BUILD_NUMBER}-${env.SHORT_SHA}"
+                }
+            }
+        }
+
+        stage('Notify - Started') {
+            steps {
+                withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
+                    sh './notifications/slack-notify.sh started "$SLACK_WEBHOOK" "$SLACK_CHANNEL" "$APP_NAME" "$BUILD_VERSION" "$DEPLOY_ENV" "$BUILD_URL"'
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh '''
+                    echo "Building ${APP_NAME} version ${BUILD_VERSION}"
+                    docker build -t ${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION} .
+                    docker tag ${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION} ${DOCKER_REGISTRY}/${APP_NAME}:latest
+                '''
+            }
+        }
+
+        stage('Test') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        sh '''
+                            echo "Running unit tests"
+                            docker run --rm ${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION} npm test
+                        '''
+                    }
+                }
+                stage('Integration Tests') {
+                    steps {
+                        sh '''
+                            echo "Running integration tests"
+                            docker-compose -f docker-compose.test.yml up --abort-on-container-exit
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch pattern: 'v*', comparator: 'GLOB'
+                }
+            }
+            steps {
+                sh '''
+                    echo "Running Trivy vulnerability scan"
+                    trivy image --exit-code 1 --severity HIGH,CRITICAL ${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION}
+                '''
+            }
+        }
+
+        stage('Push Image') {
+            when {
+                anyOf {
+                    branch 'develop'
+                    branch 'main'
+                    branch pattern: 'v*', comparator: 'GLOB'
+                }
+            }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'docker-registry-creds', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+                    sh '''
+                        echo "$REG_PASS" | docker login ${DOCKER_REGISTRY} -u "$REG_USER" --password-stdin
+                        docker push ${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION}
+                        docker push ${DOCKER_REGISTRY}/${APP_NAME}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Dev') {
+            when {
+                allOf {
+                    branch 'develop'
+                    environment name: 'SHOULD_DEPLOY', value: 'true'
+                }
+            }
+            steps {
+                sh '''
+                    echo "Deploying to dev environment"
+                    kubectl set image deployment/${APP_NAME} ${APP_NAME}=${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION} -n dev
+                    kubectl rollout status deployment/${APP_NAME} -n dev --timeout=300s
+                '''
+            }
+        }
+
+        stage('Deploy to Staging') {
+            when {
+                allOf {
+                    branch 'main'
+                    environment name: 'SHOULD_DEPLOY', value: 'true'
+                }
+            }
+            steps {
+                sh '''
+                    echo "Deploying to staging environment"
+                    kubectl set image deployment/${APP_NAME} ${APP_NAME}=${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION} -n staging
+                    kubectl rollout status deployment/${APP_NAME} -n staging --timeout=300s
+                '''
+            }
+        }
+
+        stage('Deploy to Production') {
+            when {
+                allOf {
+                    branch pattern: 'v*', comparator: 'GLOB'
+                    environment name: 'SHOULD_DEPLOY', value: 'true'
+                }
+            }
+            steps {
+                input message: "Deploy ${BUILD_VERSION} to production?", ok: 'Deploy'
+                sh '''
+                    echo "Deploying to production"
+                    kubectl set image deployment/${APP_NAME} ${APP_NAME}=${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION} -n production
+                    kubectl rollout status deployment/${APP_NAME} -n production --timeout=600s
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
+                sh './notifications/slack-notify.sh success "$SLACK_WEBHOOK" "$SLACK_CHANNEL" "$APP_NAME" "$BUILD_VERSION" "$DEPLOY_ENV" "$BUILD_URL"'
+            }
+        }
+        failure {
+            withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
+                sh './notifications/slack-notify.sh failure "$SLACK_WEBHOOK" "$SLACK_CHANNEL" "$APP_NAME" "$BUILD_VERSION" "$DEPLOY_ENV" "$BUILD_URL"'
+            }
+        }
+        aborted {
+            withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
+                sh './notifications/slack-notify.sh aborted "$SLACK_WEBHOOK" "$SLACK_CHANNEL" "$APP_NAME" "$BUILD_VERSION" "$DEPLOY_ENV" "$BUILD_URL"'
+            }
+        }
+        cleanup {
+            sh '''
+                docker rmi ${DOCKER_REGISTRY}/${APP_NAME}:${BUILD_VERSION} 2>/dev/null || true
+                docker rmi ${DOCKER_REGISTRY}/${APP_NAME}:latest 2>/dev/null || true
+            '''
+        }
+    }
+}

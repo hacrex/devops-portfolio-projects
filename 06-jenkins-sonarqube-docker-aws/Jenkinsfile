@@ -1,0 +1,116 @@
+pipeline {
+    agent any
+
+    environment {
+        SONAR_SERVER = 'sonarqube'
+        SONAR_PROJECT_KEY = 'netflix-clone-app'
+        DOCKER_IMAGE = 'hacrex/netflix-clone'
+        DOCKER_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT[0..7]}"
+        DEPLOY_HOST = 'deploy-target.example.com'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                echo "Building branch: ${env.BRANCH_NAME}"
+            }
+        }
+
+        stage('Build & Unit Test') {
+            steps {
+                dir('app') {
+                    sh 'mvn clean package -DskipTests=false'
+                }
+            }
+            post {
+                always {
+                    junit 'app/**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                dir('app') {
+                    withSonarQubeEnv("${SONAR_SERVER}") {
+                        sh '''
+                            mvn sonar:sonar \
+                                -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                                -Dsonar.host.url=${SONAR_HOST_URL} \
+                                -Dsonar.login=${SONAR_AUTH_TOKEN}
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                script {
+                    docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
+                    docker.tag("${DOCKER_IMAGE}:${DOCKER_TAG}", "${DOCKER_IMAGE}:latest")
+                }
+            }
+        }
+
+        stage('Push to DockerHub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                        docker push "${DOCKER_IMAGE}:${DOCKER_TAG}"
+                        docker push "${DOCKER_IMAGE}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to EC2') {
+            steps {
+                sshagent(['ec2-deploy-key']) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ec2-user@${DEPLOY_HOST} \
+                            "docker pull ${DOCKER_IMAGE}:${DOCKER_TAG} && \
+                             docker stop netflix-clone || true && \
+                             docker rm netflix-clone || true && \
+                             docker run -d --name netflix-clone \
+                                -p 80:8080 \
+                                --restart unless-stopped \
+                                ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            slackSend(
+                color: 'good',
+                message: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}\nBranch: ${env.BRANCH_NAME}\nImage: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            )
+        }
+        failure {
+            slackSend(
+                color: 'danger',
+                message: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}\nBranch: ${env.BRANCH_NAME}\nCheck: ${env.BUILD_URL}"
+            )
+        }
+        always {
+            cleanWs()
+        }
+    }
+}
